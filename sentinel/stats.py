@@ -59,5 +59,5 @@ def ip_anomalies(df: pd.DataFrame, threshold: float = Z_THRESHOLD) -> list[Alert
             user="-", time=hour,
             detail=f"{int(stacked[(hour, ip)])} events in 1h (z={score:.1f}, "
                    f"normal ≈ {stacked.mean():.1f})",
-            score=round(float(score), 2)))
+            score=round(float(score), 2), detector="statistical"))
     return alerts

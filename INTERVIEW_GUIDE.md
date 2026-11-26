@@ -1,76 +1,62 @@
 # CyberSentinel: how to explain it (plain English)
 
-## The 30-second pitch
-"CyberSentinel reads login logs and flags suspicious activity. It uses two approaches:
-rules for attacks we already know about, like brute force or password spraying, and
-statistics, specifically z-scores, to catch anything that's way outside normal
-behavior even if no rule covers it. Results show up in a dashboard with charts and a
-ranked alert table, and serious alerts can be sent to Slack. It's Python with pandas
-for the data and Plotly/Streamlit for the dashboard."
+## 30-second pitch
+"CyberSentinel detects attacks in login logs. It combines four approaches: rules for known
+attacks like brute force and password spraying, z-score statistics, a per-user baseline that
+learns when each person normally logs in, and an Isolation Forest machine-learning model.
+To avoid drowning analysts in false alarms, it uses risk-based correlation: weak signals only
+become alerts when they stack up on the same account. Every alert maps to MITRE ATT&CK. I
+measured it on labeled data, 94.5% precision and 96% recall, and ran it on 655,000 lines of
+real SSH logs from an internet-facing server, where it flagged 99% of the heavy attackers."
 
-## The attacks, in normal words
-- **Brute force:** someone guesses one account's password over and over, fast.
-- **Password spraying:** someone tries one common password (like "Winter2026!") on
-  MANY accounts, so no single account gets locked out.
-- **Success after failures:** lots of wrong passwords, then a correct one. The guessing
-  may have worked. This is the most serious, so it's "critical".
-- **New country:** your account always logs in from the US, then suddenly the
-  Netherlands. Maybe stolen credentials.
-- **Off-hours:** a login at 3am. Low severity on its own, but adds context.
+## The numbers to remember
+- **94.5% precision, 96.2% recall, F1 0.95** (combined, 105 labeled attacks)
+- Correlation raised precision **66.9% → 94.5%**
+- Real data: **344,624 login attempts, 1,042 IPs, ~4 seconds, 99.1% of heavy attackers flagged**
+- **21 automated tests**, run on GitHub Actions on every push
 
-## How it works, step by step
-1. **Parse** (parser.py): logs become a pandas table, one row per login attempt:
-   time, user, IP, success/fail, country. For real Linux server logs (auth.log) I use a
-   regex, a text pattern, to pull the user and IP out of lines like
-   "Failed password for root from 203.0.113.5".
-2. **Rules** (rules.py): for brute force I group failures by IP and use a rolling
-   5-minute window to count them. 10+ in 5 minutes = alert.
-3. **Statistics** (stats.py): I count events per IP per hour. Then the z-score:
-   (this count − average count) ÷ standard deviation. It says "how unusual is this?"
-   z of 3+ happens by random chance well under 1% of the time, so that's my threshold.
-4. **Alerts** (alerts.py): each finding gets a severity, duplicates get removed (one
-   alert per rule/IP/user/hour, so nobody gets spammed), and they're sorted
-   critical → low.
-5. **Charts**: Plotly for the interactive dashboard, Matplotlib (report.py) for a static
-   PNG report you can attach to a ticket or email (`--plot report.png`).
-6. **Dashboard** (dashboard.py): metrics, color-coded alert table, failed logins per hour
-   with anomalies marked, the z-score over time with the threshold line, and top IPs.
+## Key ideas, simply
+- **Precision** = of my alerts, how many were real? **Recall** = of the real attacks, how many did I catch?
+  Security cares about both: low precision means analysts ignore alerts ("alert fatigue"); low recall means you miss breaches.
+- **Why 4 detector types?** Rules are precise but only catch what you predicted. Stats catch volume
+  spikes. Baselines catch "normal for others, weird for you." ML catches combinations no single rule describes.
+- **Isolation Forest:** builds random trees that split the data. Weird points get isolated in very
+  few splits. It's unsupervised: no labels needed, which matters because real logs have no answer key.
+- **Per-user baseline:** each user gets a 24-hour histogram of past logins, smoothed so neighboring hours
+  count a bit. It only looks at past data (no peeking at the future). Suspicious logins are learned at
+  30% weight, so an attacker can't quickly "teach" it that 3am is normal.
+- **Risk-based correlation:** low signals = 15 points, medium = 30. A weak signal is escalated only if a
+  *different* detector also flagged the same account within 24h. That's the same idea as Splunk's Risk-Based Alerting.
+- **Impossible travel:** haversine formula = distance on a sphere. If the distance divided by the time
+  between logins is faster than 900 km/h (a jet), one login isn't the real person.
+- **Credential stuffing:** a botnet with many IPs, each trying 1–3 leaked passwords. Per-IP rules never
+  fire, so the rule looks at the crowd: 15+ quiet IPs hitting 10+ accounts in one hour.
+- **MITRE ATT&CK:** a public catalog of attacker techniques. T1110 = Brute Force, T1078 = Valid Accounts.
+  SOC teams talk in these IDs.
 
-## Why rules AND statistics?
-Rules are precise and easy to explain, but they only catch what you predicted.
-Statistics catch the unexpected, but can't tell you *what kind* of attack it is. Real
-security tools (SIEMs like Splunk) use both. In my demo the brute-force attack was
-caught by both: the rule said "brute force" and the z-score said "40 events when
-normal is 1.6".
+## How I measured it (they WILL ask)
+Real logs don't say which events are attacks, so I wrote a simulator: 40 employees with home cities and
+work-hour habits, plus realistic noise (typos, late nights, legitimate business trips), plus 7 attack types
+at random times. Every event has a label. I ran each detector on 5 different random companies and averaged
+precision, recall, and F1. A test in the suite fails the build if accuracy drops below 85%/90%.
 
-## How I tested it
-I wrote a generator that creates a week of fake but realistic logs: 16 normal users
-logging in during work hours, occasionally typing their password wrong, plus 4 hidden
-attacks. The end-to-end test checks that all 4 attacks are found AND that no normal
-user gets flagged (no false positives). Also unit tests for each rule, the z-score
-math, and the log parser. 9 tests, all passing.
+## Real data story
+I ran it on Loghub's OpenSSH dataset: 655k log lines from a real server. 99.9% of logins failed, so it's
+under constant attack. The top attacker made 28,000+ attempts. I found the parser was missing about 180k
+events because syslog collapses duplicates into "message repeated 5 times", so I fixed the parser. My
+first version only flagged 80% of heavy attackers: the misses were *patient* attackers doing about 20
+attempts a day for weeks. I added a "persistent attacker" rule and a 24-hour spray window, and coverage went to 99.1%.
 
-## A problem I hit
-"At first a user who mistyped their password 12 times across a whole day could look
-like brute force. Using a rolling 5-minute time window instead of a total count fixed
-it. I wrote a test for exactly that case."
+## Problems I solved (pick one for "tell me about a challenge")
+1. The behavioral baseline was noisy (35% precision). Adding risk correlation took combined precision from 67% to 94.5%.
+2. The insider detector kept missing repeat 3am logins because the baseline was *learning* from the
+   attacker. Learning from suspicious events at reduced weight fixed it.
+3. Syslog "message repeated" lines were hiding about half the real attack volume.
 
-## What I'd improve
-- Learn a separate "normal" for each user instead of one global normal
-- Real IP geolocation (MaxMind GeoIP) instead of a country column
-- Stream logs in real time instead of batch files
-- Try an ML model like Isolation Forest and compare with z-scores
+## Limits (be honest; interviewers love this)
+- Insiders using valid credentials from their normal location: only 73% caught.
+- New users need about 10 logins before the baseline can judge them (cold start).
+- The simulator is my model of attacks, so real-world precision would need labeled real incidents to confirm.
 
-## Likely questions
-- **What's a z-score?** How many standard deviations a value is from the average.
-- **What's a false positive?** An alert on something harmless. Too many and people
-  ignore alerts ("alert fatigue"), which is why I de-duplicate and rank by severity.
-- **What's a SIEM?** Security Information and Event Management: tools like Splunk or
-  Microsoft Sentinel that collect logs and alert on threats. This is a mini version.
-- **Why exit code 1?** So an automated script or scheduled job can react when
-  something critical is found.
-
-## Commands to remember
-- `python -m sentinel sample_data/login_logs.csv`  command-line report
-- `streamlit run dashboard.py`  dashboard
-- `pytest`  tests
+## Commands
+`python -m sentinel analyze <log>` · `python -m sentinel watch <log>` · `python -m sentinel evaluate` · `streamlit run dashboard.py` · `pytest`
